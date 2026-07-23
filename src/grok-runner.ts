@@ -408,7 +408,12 @@ export function parseGrokModelsOutput(stdout: string): GrokModelDescriptor[] {
   const seen = new Set<string>();
   for (const line of trimmed.split("\n")) {
     // Skip headers, empty lines, and auth notices
-    if (!line.trim() || line.includes(":") || /not authenticated/i.test(line)) {
+    if (
+      !line.trim() ||
+      line.includes(":") ||
+      /not authenticated/i.test(line) ||
+      /^\s*you are logged in\b/i.test(line)
+    ) {
       continue;
     }
     // Match bullet-prefixed model lines: * model-id (optional meta)

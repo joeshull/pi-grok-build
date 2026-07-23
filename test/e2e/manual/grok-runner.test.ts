@@ -361,6 +361,19 @@ describe("parseGrokModelsOutput", () => {
     assert.equal(models[1]!.id, "grok-2");
   });
 
+  it("ignores Grok CLI status prose", () => {
+    const text = [
+      "You are logged in with grok.com.",
+      "",
+      "Default model: grok-4.5",
+      "",
+      "Available models:",
+      "  * grok-4.5 (default)",
+    ].join("\n");
+
+    assert.deepEqual(parseGrokModelsOutput(text), [{ id: "grok-4.5", name: "grok-4.5" }]);
+  });
+
   it("returns empty array for empty input", () => {
     assert.deepEqual(parseGrokModelsOutput(""), []);
     assert.deepEqual(parseGrokModelsOutput("   "), []);
