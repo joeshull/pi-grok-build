@@ -135,7 +135,7 @@ export function createGrokBuildExtension(options: GrokBuildOptions = {}) {
         // Probe the CLI after registration without blocking Pi startup. Discovery is
         // diagnostic-only for this session; provider models are intentionally stable.
         setImmediate(() => {
-          void runGrokModelsAsync()
+          void runGrokModelsAsync({ detach: true })
             .then((result) => {
               if (!result.ok) {
                 diagnostics.warn("background grok model probe failed", () => ({

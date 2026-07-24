@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   runGrokModels,
   runGrokModelsAsync,
@@ -143,6 +145,34 @@ exit 1
       assert.notEqual(result.stderr, "");
     });
   });
+});
+
+it("lets the parent exit while a background probe is still running", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-grok-build-models-detached-"));
+  const grokPath = join(dir, "grok");
+  writeFileSync(
+    grokPath,
+    `#!/bin/sh
+/bin/sleep 2
+printf '%s\\n' '  * grok-build (default)'
+`,
+  );
+  chmodSync(grokPath, 0o755);
+
+  const projectRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const runnerUrl = new URL("../../src/grok-runner.ts", import.meta.url).href;
+  const script = `import { runGrokModelsAsync } from ${JSON.stringify(runnerUrl)}; void runGrokModelsAsync({ detach: true });`;
+  const started = Date.now();
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--eval", script], {
+    cwd: projectRoot,
+    env: { ...process.env, PATH: `${dir}:${process.env.PATH ?? ""}` },
+    encoding: "utf8",
+    timeout: 1500,
+  });
+
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Date.now() - started < 1000);
 });
 
 describe("validateGrokAuth", () => {

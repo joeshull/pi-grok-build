@@ -364,6 +364,7 @@ describe("parseGrokModelsOutput", () => {
   it("ignores Grok CLI status prose", () => {
     const text = [
       "You are logged in with grok.com.",
+      "yOu ArE lOgGeD iN with grok.com.",
       "",
       "Default model: grok-4.5",
       "",
