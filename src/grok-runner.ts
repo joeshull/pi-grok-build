@@ -8,8 +8,8 @@
 
 import type { ChildProcess } from "node:child_process";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import spawn from "cross-spawn";
-import { Effect } from "effect";
 import {
   classifyGrokFailure,
   createDiagnostics,
@@ -21,6 +21,16 @@ import type { GrokModelDescriptor, GrokRunResult, GrokSpawnOptions } from "./typ
 const GROK_BINARY = "grok";
 const MAX_GROK_OUTPUT = 500_000;
 const DEFAULT_GROK_TIMEOUT = 120_000;
+const require = createRequire(import.meta.url);
+
+type EffectRuntime = {
+  try(options: { try: () => string; catch: (error: unknown) => GrokCliError }): any;
+  runSync(effect: any): string;
+};
+
+function loadEffect(): EffectRuntime {
+  return require("effect").Effect as EffectRuntime;
+}
 const diagnostics = createDiagnostics("grok-runner");
 
 type GrokCommandError = {
@@ -73,7 +83,8 @@ function toMissingGrokCliError(err: unknown): GrokCliError {
 }
 
 /** Detect the installed grok binary on PATH only, modeled as a typed Effect. */
-export function detectGrokBinaryEffect(): Effect.Effect<string, GrokCliError> {
+export function detectGrokBinaryEffect(): ReturnType<EffectRuntime["try"]> {
+  const Effect = loadEffect();
   return Effect.try({
     try: () => {
       execFileSync(GROK_BINARY, ["--version"], { stdio: "pipe", timeout: 5000 });
@@ -85,6 +96,7 @@ export function detectGrokBinaryEffect(): Effect.Effect<string, GrokCliError> {
 
 /** Detect the installed grok binary on PATH only. */
 export function detectGrokBinary(): string {
+  const Effect = loadEffect();
   return Effect.runSync(detectGrokBinaryEffect());
 }
 
@@ -345,10 +357,11 @@ export function runGrokCommand(
  */
 export function runGrokCommandAsync(
   args: string[],
-  options: { cwd?: string; timeout?: number } = {},
+  options: { cwd?: string; timeout?: number; detach?: boolean } = {},
 ): Promise<GrokRunResult> {
   const maxOutput = MAX_GROK_OUTPUT;
   const timeout = options.timeout ?? DEFAULT_GROK_TIMEOUT;
+  const detach = options.detach ?? false;
 
   return new Promise((resolve) => {
     let stdout = "";
@@ -397,8 +410,16 @@ export function runGrokCommandAsync(
     }
 
     registerProcess(proc);
+    if (detach) {
+      // The startup probe is diagnostic-only; never keep Pi startup alive for it.
+      proc.unref();
+    }
     proc.stdout?.on("data", (chunk: Buffer | string) => append("stdout", chunk));
     proc.stderr?.on("data", (chunk: Buffer | string) => append("stderr", chunk));
+    if (detach) {
+      (proc.stdout as unknown as { unref?: () => void } | null)?.unref?.();
+      (proc.stderr as unknown as { unref?: () => void } | null)?.unref?.();
+    }
     proc.once("error", (err) => {
       finish(
         grokCommandFailure(args, { message: err.message, stdout, stderr, status: null }, maxOutput),
@@ -432,6 +453,7 @@ export function runGrokCommandAsync(
         ),
       );
     }, timeout);
+    if (detach) timer.unref?.();
   });
 }
 
@@ -453,7 +475,9 @@ export function runGrokModels(options: { cwd?: string } = {}): GrokRunResult {
 /**
  * Run `grok models` without blocking the extension event loop.
  */
-export function runGrokModelsAsync(options: { cwd?: string } = {}): Promise<GrokRunResult> {
+export function runGrokModelsAsync(
+  options: { cwd?: string; detach?: boolean } = {},
+): Promise<GrokRunResult> {
   return runGrokCommandAsync(["models"], options);
 }
 
