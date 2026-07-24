@@ -19,7 +19,45 @@ import {
 import type { GrokModelDescriptor, GrokRunResult, GrokSpawnOptions } from "./types.ts";
 
 const GROK_BINARY = "grok";
+const MAX_GROK_OUTPUT = 500_000;
+const DEFAULT_GROK_TIMEOUT = 120_000;
 const diagnostics = createDiagnostics("grok-runner");
+
+type GrokCommandError = {
+  stdout?: Buffer | string;
+  stderr?: Buffer | string;
+  status?: number | null;
+  message?: string;
+};
+
+function grokCommandFailure(
+  args: string[],
+  execErr: GrokCommandError,
+  maxOutput = MAX_GROK_OUTPUT,
+): GrokRunResult {
+  const stdout =
+    typeof execErr.stdout === "string" ? execErr.stdout : (execErr.stdout?.toString() ?? "");
+  const stderr = execErr.stderr?.toString() ?? execErr.message ?? "Unknown error";
+  const diagnostic = classifyGrokFailure({
+    message: execErr.message,
+    stderr,
+    stdout,
+    exitCode: execErr.status ?? 1,
+  });
+
+  diagnostics.warn("grok command failed", () => ({
+    args: redactGrokArgs(args),
+    diagnostic: { ...diagnostic, stdout: undefined, stderr: undefined },
+  }));
+
+  return {
+    ok: false,
+    exitCode: execErr.status ?? 1,
+    stdout: stdout.slice(0, maxOutput),
+    stderr: diagnostic.message.slice(0, maxOutput),
+    truncated: stdout.length > maxOutput || stderr.length > maxOutput,
+  };
+}
 
 function toMissingGrokCliError(err: unknown): GrokCliError {
   const message = err instanceof Error ? err.message : String(err);
@@ -269,18 +307,18 @@ export function runGrokCommand(
   args: string[],
   options: { cwd?: string; timeout?: number } = {},
 ): GrokRunResult {
-  const maxOutput = 500_000; // 500KB limit
+  const maxOutput = MAX_GROK_OUTPUT;
 
   try {
     const binary = GROK_BINARY;
     diagnostics.debug("running grok command", () => ({
       args: redactGrokArgs(args),
       cwd: options.cwd ?? process.cwd(),
-      timeout: options.timeout ?? 120_000,
+      timeout: options.timeout ?? DEFAULT_GROK_TIMEOUT,
     }));
     const stdout = execFileSync(binary, args, {
       cwd: options.cwd ?? process.cwd(),
-      timeout: options.timeout ?? 120_000,
+      timeout: options.timeout ?? DEFAULT_GROK_TIMEOUT,
       maxBuffer: maxOutput,
       stdio: "pipe",
       encoding: "utf-8",
@@ -295,36 +333,106 @@ export function runGrokCommand(
       truncated: text.length > maxOutput,
     };
   } catch (err: unknown) {
-    const execErr = err as {
-      stdout?: Buffer | string;
-      stderr?: Buffer | string;
-      status?: number;
-      message?: string;
+    return grokCommandFailure(args, err as GrokCommandError, maxOutput);
+  }
+}
+
+/**
+ * Run a raw Grok CLI command without blocking the extension's event loop.
+ *
+ * The child process is tracked for teardown and resolves with the same
+ * structured result as the synchronous runner.
+ */
+export function runGrokCommandAsync(
+  args: string[],
+  options: { cwd?: string; timeout?: number } = {},
+): Promise<GrokRunResult> {
+  const maxOutput = MAX_GROK_OUTPUT;
+  const timeout = options.timeout ?? DEFAULT_GROK_TIMEOUT;
+
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let truncated = false;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const append = (target: "stdout" | "stderr", chunk: Buffer | string): void => {
+      const text = chunk.toString();
+      const current = target === "stdout" ? stdout : stderr;
+      const remaining = maxOutput - current.length;
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      const next = current + text.slice(0, remaining);
+      if (target === "stdout") stdout = next;
+      else stderr = next;
+      if (text.length > remaining) truncated = true;
     };
 
-    const stdout =
-      typeof execErr.stdout === "string" ? execErr.stdout : (execErr.stdout?.toString() ?? "");
-    const stderr = execErr.stderr?.toString() ?? execErr.message ?? "Unknown error";
+    const finish = (result: GrokRunResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
 
-    const diagnostic = classifyGrokFailure({
-      message: execErr.message,
-      stderr,
-      stdout,
-      exitCode: execErr.status ?? 1,
-    });
-    diagnostics.warn("grok command failed", () => ({
+    diagnostics.debug("running grok command asynchronously", () => ({
       args: redactGrokArgs(args),
-      diagnostic: { ...diagnostic, stdout: undefined, stderr: undefined },
+      cwd: options.cwd ?? process.cwd(),
+      timeout,
     }));
 
-    return {
-      ok: false,
-      exitCode: execErr.status ?? 1,
-      stdout: stdout.slice(0, maxOutput),
-      stderr: diagnostic.message.slice(0, maxOutput),
-      truncated: stdout.length > maxOutput || stderr.length > maxOutput,
-    };
-  }
+    let proc: ChildProcess;
+    try {
+      proc = spawn(GROK_BINARY, args, {
+        cwd: options.cwd ?? process.cwd(),
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      }) as ChildProcess;
+    } catch (err: unknown) {
+      finish(grokCommandFailure(args, err as GrokCommandError, maxOutput));
+      return;
+    }
+
+    registerProcess(proc);
+    proc.stdout?.on("data", (chunk: Buffer | string) => append("stdout", chunk));
+    proc.stderr?.on("data", (chunk: Buffer | string) => append("stderr", chunk));
+    proc.once("error", (err) => {
+      finish(
+        grokCommandFailure(args, { message: err.message, stdout, stderr, status: null }, maxOutput),
+      );
+    });
+    proc.once("close", (code, signal) => {
+      if (code === 0) {
+        finish({ ok: true, exitCode: 0, stdout, stderr, truncated });
+        return;
+      }
+      finish(
+        grokCommandFailure(
+          args,
+          {
+            ...(signal ? { message: `grok command terminated by ${signal}` } : {}),
+            stdout,
+            stderr,
+            status: code,
+          },
+          maxOutput,
+        ),
+      );
+    });
+    timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      finish(
+        grokCommandFailure(
+          args,
+          { message: `grok command timed out after ${timeout}ms`, stdout, stderr, status: null },
+          maxOutput,
+        ),
+      );
+    }, timeout);
+  });
 }
 
 /**
@@ -340,6 +448,13 @@ export function runGrokInspect(options: { cwd?: string } = {}): GrokRunResult {
  */
 export function runGrokModels(options: { cwd?: string } = {}): GrokRunResult {
   return runGrokCommand(["models"], options);
+}
+
+/**
+ * Run `grok models` without blocking the extension event loop.
+ */
+export function runGrokModelsAsync(options: { cwd?: string } = {}): Promise<GrokRunResult> {
+  return runGrokCommandAsync(["models"], options);
 }
 
 /**
