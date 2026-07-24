@@ -22,6 +22,7 @@ import {
   runGrokInspect,
   runGrokMemory,
   runGrokModels,
+  runGrokModelsAsync,
   runGrokSessions,
   runGrokShare,
   validateGrokAuth,
@@ -115,26 +116,10 @@ export function createGrokBuildExtension(options: GrokBuildOptions = {}) {
   return {
     register(pi: ExtensionAPI): void {
       try {
-        const authed = validateGrokAuth();
-        if (!authed) {
-          diagnostics.warn("grok cli is unavailable or unauthenticated at extension registration");
-        }
-
-        // --- Provider Registration ---
-        // This provider routes through the local Grok CLI, so only advertise model IDs
-        // the CLI itself accepts. Pi's xAI model catalog may contain API model IDs that
-        // Grok Build rejects, which makes the UI selectable but dead at submit time.
-        const cliModelResult = runGrokModels();
-        const cliModels = cliModelResult.ok ? parseGrokModelsOutput(cliModelResult.stdout) : [];
-        const modelSource = cliModels.length > 0 ? "grok models" : "fallback";
-        if (!cliModelResult.ok) {
-          diagnostics.warn("falling back to default grok-build model list", () => ({
-            stderr: cliModelResult.stderr,
-            exitCode: cliModelResult.exitCode,
-          }));
-        }
-        const models =
-          cliModels.length > 0 ? buildGrokProviderModels(cliModels) : [fallbackGrokBuildModel()];
+        // Registration must not wait for the Grok CLI. Keep the provider available
+        // immediately and use the explicit models command for live discovery.
+        const modelSource = "fallback";
+        const models = [fallbackGrokBuildModel()];
 
         pi.registerProvider(PROVIDER_ID, {
           baseUrl: "pi-grok-build",
@@ -146,6 +131,35 @@ export function createGrokBuildExtension(options: GrokBuildOptions = {}) {
               ...streamOptions,
             });
           },
+        });
+        // Probe the CLI after registration without blocking Pi startup. Discovery is
+        // diagnostic-only for this session; provider models are intentionally stable.
+        setImmediate(() => {
+          void runGrokModelsAsync()
+            .then((result) => {
+              if (!result.ok) {
+                diagnostics.warn("background grok model probe failed", () => ({
+                  stderr: result.stderr,
+                  exitCode: result.exitCode,
+                }));
+                return;
+              }
+
+              const cliModels = parseGrokModelsOutput(result.stdout);
+              if (/not authenticated/i.test(result.stdout) || cliModels.length === 0) {
+                diagnostics.warn("background grok model probe found no authenticated models");
+                return;
+              }
+
+              diagnostics.debug("background grok model probe completed", () => ({
+                modelCount: cliModels.length,
+              }));
+            })
+            .catch((err: unknown) => {
+              diagnostics.warn("background grok model probe threw", () => ({
+                error: err instanceof Error ? err.message : String(err),
+              }));
+            });
         });
 
         // --- Commands ---
