@@ -10,6 +10,7 @@ import {
   type StopReason,
 } from "@earendil-works/pi-ai";
 import spawn from "cross-spawn";
+import { createContentBlockSequencer } from "./content-blocks.ts";
 import { classifyGrokFailure, createDiagnostics, formatGrokFailure } from "./diagnostics.ts";
 import { captureStderr, forceKillProcess, registerProcess } from "./grok-runner.ts";
 import { GROK_DEFAULT_INTEGRATION_MODE } from "./model-metadata.ts";
@@ -207,8 +208,6 @@ export function streamViaGrokAcp(
     let cleanupNotifications: (() => void) | undefined;
     let streamEnded = false;
     let started = false;
-    let textIndex: number | undefined;
-    let thinkingIndex: number | undefined;
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
 
     const ensureStarted = (): void => {
@@ -217,58 +216,17 @@ export function streamViaGrokAcp(
       stream.push({ type: "start", partial: output });
     };
 
-    const appendTextDelta = (delta: string): void => {
-      if (!delta) return;
-      ensureStarted();
-      if (textIndex === undefined) {
-        textIndex = output.content.length;
-        output.content.push({ type: "text", text: "" });
-        stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-      }
-      const block = output.content[textIndex];
-      if (block?.type === "text") block.text += delta;
-      stream.push({ type: "text_delta", contentIndex: textIndex, delta, partial: output });
-    };
-
-    const appendThinkingDelta = (delta: string): void => {
-      if (!delta) return;
-      ensureStarted();
-      if (thinkingIndex === undefined) {
-        thinkingIndex = output.content.length;
-        output.content.push({ type: "thinking", thinking: "", thinkingSignature: "" });
-        stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-      }
-      const block = output.content[thinkingIndex];
-      if (block?.type === "thinking") block.thinking += delta;
-      stream.push({ type: "thinking_delta", contentIndex: thinkingIndex, delta, partial: output });
-    };
-
-    const finishOpenBlocks = (): void => {
-      if (thinkingIndex !== undefined) {
-        const block = output.content[thinkingIndex];
-        if (block?.type === "thinking") {
-          stream.push({
-            type: "thinking_end",
-            contentIndex: thinkingIndex,
-            content: block.thinking,
-            partial: output,
-          });
-        }
-        thinkingIndex = undefined;
-      }
-      if (textIndex !== undefined) {
-        const block = output.content[textIndex];
-        if (block?.type === "text") {
-          stream.push({
-            type: "text_end",
-            contentIndex: textIndex,
-            content: block.text,
-            partial: output,
-          });
-        }
-        textIndex = undefined;
-      }
-    };
+    // Grok's agent loop interleaves reasoning and answer runs across tool calls.
+    // The sequencer turns each run into its own tail block so deltas never land
+    // on an earlier block (see src/content-blocks.ts).
+    const blocks = createContentBlockSequencer({
+      push: (event) => stream.push(event),
+      output,
+      ensureStarted,
+    });
+    const appendTextDelta = blocks.appendText;
+    const appendThinkingDelta = blocks.appendThinking;
+    const finishOpenBlocks = blocks.finish;
 
     const endWithError = (message: string): void => {
       if (streamEnded) return;
