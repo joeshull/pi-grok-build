@@ -50,7 +50,9 @@ describe("Grok provider metadata", () => {
     );
   });
 
-  it("fallback model remains grok-build", () => {
-    assert.equal(fallbackGrokBuildModel().id, "grok-build");
+  it("fallback model is the id grok CLI actually offers", () => {
+    // grok 0.2.112 retired `grok-build`; `grok models` lists only grok-4.5.
+    assert.equal(fallbackGrokBuildModel().id, "grok-4.5");
+    assert.equal(fallbackGrokBuildModel().name, "Grok 4.5");
   });
 });

@@ -14,6 +14,7 @@ import { createContentBlockSequencer } from "./content-blocks.ts";
 import { classifyGrokFailure, createDiagnostics, formatGrokFailure } from "./diagnostics.ts";
 import { captureStderr, forceKillProcess, registerProcess } from "./grok-runner.ts";
 import { GROK_DEFAULT_INTEGRATION_MODE } from "./model-metadata.ts";
+import { formatGrokToolCall, type GrokToolCallUpdate } from "./tool-activity.ts";
 import type { GrokReasoningEffort, GrokUsage } from "./types.ts";
 
 export type GrokIntegrationMode = "jsonl" | "acp";
@@ -283,13 +284,17 @@ export function streamViaGrokAcp(
         resetInactivityTimer();
         if (message.method !== "session/update") return;
         const params = message.params as {
-          update?: { sessionUpdate?: string; content?: { text?: string } };
+          update?: GrokToolCallUpdate & { sessionUpdate?: string; content?: { text?: string } };
         };
         const update = params.update;
         if (update?.sessionUpdate === "agent_message_chunk")
           appendTextDelta(update.content?.text ?? "");
         if (update?.sessionUpdate === "agent_thought_chunk")
           appendThinkingDelta(update.content?.text ?? "");
+        // Grok runs its own tools; announce them so the turn does not look idle.
+        // Inert text on purpose — see src/tool-activity.ts.
+        const toolLine = formatGrokToolCall(update);
+        if (toolLine) appendTextDelta(toolLine);
       });
 
       if (options?.signal?.aborted) {
