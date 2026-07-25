@@ -22,6 +22,7 @@ import {
   resolveGrokIntegrationMode,
   streamViaGrokAcp,
 } from "./acp-mode.ts";
+import { createContentBlockSequencer } from "./content-blocks.ts";
 import { classifyGrokFailure, createDiagnostics, formatGrokFailure } from "./diagnostics.ts";
 import { createGrokEventBridge } from "./grok-bridge.ts";
 import {
@@ -272,8 +273,6 @@ export function streamViaGrok(
       let streamEnded = false;
       const broken = false;
       let started = false;
-      let textIndex: number | undefined;
-      let thinkingIndex: number | undefined;
 
       function ensureStarted(): void {
         if (started) return;
@@ -281,67 +280,17 @@ export function streamViaGrok(
         stream.push({ type: "start", partial: output });
       }
 
-      function appendTextDelta(delta: string): void {
-        if (!delta) return;
-        ensureStarted();
-        if (textIndex === undefined) {
-          textIndex = output.content.length;
-          output.content.push({ type: "text" as const, text: "" });
-          stream.push({ type: "text_start", contentIndex: textIndex, partial: output });
-        }
-        const block = output.content[textIndex];
-        if (block?.type === "text") {
-          block.text += delta;
-        }
-        stream.push({ type: "text_delta", contentIndex: textIndex, delta, partial: output });
-      }
-
-      function appendThinkingDelta(delta: string): void {
-        if (!delta) return;
-        ensureStarted();
-        if (thinkingIndex === undefined) {
-          thinkingIndex = output.content.length;
-          output.content.push({ type: "thinking" as const, thinking: "", thinkingSignature: "" });
-          stream.push({ type: "thinking_start", contentIndex: thinkingIndex, partial: output });
-        }
-        const block = output.content[thinkingIndex];
-        if (block?.type === "thinking") {
-          block.thinking += delta;
-        }
-        stream.push({
-          type: "thinking_delta",
-          contentIndex: thinkingIndex,
-          delta,
-          partial: output,
-        });
-      }
-
-      function finishOpenBlocks(): void {
-        if (thinkingIndex !== undefined) {
-          const block = output.content[thinkingIndex];
-          if (block?.type === "thinking") {
-            stream.push({
-              type: "thinking_end",
-              contentIndex: thinkingIndex,
-              content: block.thinking,
-              partial: output,
-            });
-          }
-          thinkingIndex = undefined;
-        }
-        if (textIndex !== undefined) {
-          const block = output.content[textIndex];
-          if (block?.type === "text") {
-            stream.push({
-              type: "text_end",
-              contentIndex: textIndex,
-              content: block.text,
-              partial: output,
-            });
-          }
-          textIndex = undefined;
-        }
-      }
+      // Same chronological block sequencing as the ACP path: each contiguous
+      // thought/text run gets its own tail block so deltas never target an
+      // already-settled block (see src/content-blocks.ts).
+      const blocks = createContentBlockSequencer({
+        push: (event) => stream.push(event),
+        output,
+        ensureStarted,
+      });
+      const appendTextDelta = blocks.appendText;
+      const appendThinkingDelta = blocks.appendThinking;
+      const finishOpenBlocks = blocks.finish;
 
       function endStreamWithError(errMsg: string): void {
         if (streamEnded || broken) return;
