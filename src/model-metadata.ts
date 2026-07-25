@@ -2,6 +2,8 @@ import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { GrokModelDescriptor } from "./types.ts";
 
 export const GROK_BUILD_PROVIDER_ID = "pi-grok-build";
+/** The only model Grok CLI 0.2.112 offers (`grok models`). */
+export const GROK_DEFAULT_MODEL_ID = "grok-4.5";
 export const GROK_JSONL_INTEGRATION_MODE = "jsonl";
 export const GROK_DEFAULT_INTEGRATION_MODE = "acp";
 
@@ -37,6 +39,15 @@ export function buildGrokProviderModels(
   return descriptors.map(buildGrokProviderModel);
 }
 
+/**
+ * Model registered when live discovery has not (yet) run.
+ *
+ * Grok CLI 0.2.112 retired the `grok-build` model id — `grok models` now offers
+ * only `grok-4.5`, and passing `--model grok-build` is silently ignored by the
+ * CLI, which routes to grok-4.5 anyway. Registering the real id keeps Pi's model
+ * list honest and stops omp warning about an unknown model in its role and
+ * fallback-chain config.
+ */
 export function fallbackGrokBuildModel(): ProviderModelConfig {
-  return buildGrokProviderModel({ id: "grok-build", name: "Grok Build" });
+  return buildGrokProviderModel({ id: GROK_DEFAULT_MODEL_ID, name: "Grok 4.5" });
 }
